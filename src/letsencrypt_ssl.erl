@@ -14,8 +14,10 @@
 
 -module(letsencrypt_ssl).
 -author("Guillaume Bour <guillaume@bour.cc>").
+-author("Wim Lewis <wiml@hhhh.org>").
 
 -export([private_key/2, cert_request/3, cert_autosigned/3, certificate/4]).
+-export([certificate_request/2, self_signed_certificate/2]).
 
 -include_lib("public_key/include/public_key.hrl").
 -import(letsencrypt_utils, [bin/1]).
@@ -30,34 +32,24 @@ private_key({new, KeyFile}, CertsPath) ->
     Cmd = "openssl genrsa -out '"++FileName++"' 2048",
     _R = os:cmd(Cmd),
 
-    private_key(FileName, CertsPath);
-
+    read_private_key(FileName);
 private_key(KeyFile, _) ->
-    {ok, Pem} = file:read_file(KeyFile),
-    [Key]     = public_key:pem_decode(Pem),
-    #'RSAPrivateKey'{modulus=N, publicExponent=E, privateExponent=D} = public_key:pem_entry_decode(Key),
+    read_private_key(KeyFile).
 
+read_private_key(Path) ->
+    {ok, Pem} = file:read_file(Path),
+    [Key]     = public_key:pem_decode(Pem),
     #{
-        raw => [E,N,D],
-        b64 => {
-            letsencrypt_utils:b64encode(binary:encode_unsigned(N)),
-            letsencrypt_utils:b64encode(binary:encode_unsigned(E))
-        },
-        file => KeyFile
+        key => public_key:pem_entry_decode(Key),
+        file => Path
     }.
 
-
+% compatibility shims, for now.
 -spec cert_request(string(), string(), list(string())) -> letsencrypt:ssl_csr().
 cert_request(Domain, CertsPath, SANs) ->
-    KeyFile  = CertsPath ++ "/" ++ Domain ++ ".key",
-    CertFile = CertsPath ++ "/" ++ Domain ++ ".csr",
-    {ok, CertFile} = mkcert(request, Domain, CertFile, KeyFile, SANs),
-    %io:format("CSR ~p~n", [CertFile]),
-
-    {ok, RawCsr} = file:read_file(CertFile),
-    [{'CertificationRequest', Csr, not_encrypted}] = public_key:pem_decode(RawCsr),
-
-    %io:format("csr= ~p~n", [Csr]),
+    KeyFile = CertsPath ++ "/" ++ Domain ++ ".key",
+    Key = read_private_key(KeyFile),
+    Csr = certificate_request([Domain | SANs], maps:get(key, Key)),
     letsencrypt_utils:b64encode(Csr).
 
 
@@ -66,40 +58,168 @@ cert_request(Domain, CertsPath, SANs) ->
 -spec cert_autosigned(string(), string(), list(string())) -> {ok, string()}.
 cert_autosigned(Domain, KeyFile, SANs) ->
     CertFile = "/tmp/"++Domain++"-tlssni-autosigned.pem",
-    mkcert(autosigned, Domain, CertFile, KeyFile, SANs).
+    Key = read_private_key(KeyFile),
+    Cert = self_signed_certificate([Domain|SANs], maps:get(key, Key)),
+    file:write_file(CertFile, pem_format(Cert)),
+    {ok, CertFile}.
 
+% Generate a CSR from a list of subject names and a subject key.
+-spec certificate_request(list(letsencrypt:general_name()), public_key:private_key()) -> binary().
+certificate_request(SubjectNames, Key) ->
+    {SubjectName, SANExtension} = cn_and_ext(SubjectNames),
+    Tbs = #'CertificationRequestInfo'{
+	     version=v1,
+	     subject=SubjectName,
+	     subjectPKInfo = subject_public_key_info(open,Key),
+	     attributes = [
+			   #'AttributePKCS-10'{
+			      type=?'pkcs-9-at-extensionRequest',
+			      values=[ opentype('Extensions', [SANExtension]) ]
+			     }
+			  ]
+	    },
+    TbsBinary = public_key:der_encode('CertificationRequestInfo', Tbs),
+    SigningAlg = pkix_signature_algorithm(open, Key),
+    Signature = pkix_signature(TbsBinary, SigningAlg, Key),
+    public_key:der_encode('CertificationRequest', #'CertificationRequest'{
+		certificationRequestInfo = Tbs,
+                signatureAlgorithm = SigningAlg,
+		signature = Signature}).
 
--spec mkcert(request|autosigned, string(), string(), string(), list(string())) -> {ok, string()}.
-mkcert(request, Domain, OutName, Keyfile, []) ->
-%    CertFile = CertsPath++"/"++Domain++".csr",
-    Cmd = io_lib:format("openssl req -new -key '~s' -subj '/CN=~s' -out '~s'", [Keyfile, Domain, OutName]),
-    _R  = os:cmd(Cmd),
-    %io:format("mkcert(request):~p => ~p~n", [lists:flatten(Cmd), _R]),
+% Generate a short-lived, self-signed certificate for use with
+% the tls-sni-01 challenge
+-spec self_signed_certificate(list(letsencrypt:general_name()), public_key:private_key()) -> binary().
+self_signed_certificate(SubjectNames, Key) ->
+    {SubjectName, SANExtension} = cn_and_ext(SubjectNames),
+    EKUExtension = #'Extension'{
+		      extnID=?'id-ce-extKeyUsage',
+		      critical=false,
+		      % This just has the id-kp-serverAuth key usage purpose:
+		      extnValue= <<48,10,6,8,43,6,1,5,5,7,3,1>>
+		     },
+    SigAlg = pkix_signature_algorithm(closed, Key),
+    Tbs = #'TBSCertificate'{
+	     version=v3,
+	     serialNumber=1,
+	     subject=SubjectName,
+	     issuer=SubjectName,
+	     validity=validity_around_now(4),
+	     subjectPublicKeyInfo = subject_public_key_info(closed, Key),
+	     extensions = [ SANExtension, EKUExtension ],
+	     signature=SigAlg
+	    },
+    TbsBinary = public_key:der_encode('TBSCertificate', Tbs),
+    public_key:der_encode('Certificate', #'Certificate'{
+		tbsCertificate = Tbs,
+                signatureAlgorithm = SigAlg,
+		signature = pkix_signature(TbsBinary, SigAlg, Key)
+    }).
 
-    {ok, OutName};
-mkcert(Type, Domain, OutName, Keyfile, SANs) ->
-    %io:format("USE SANS~n"),
-    <<$,, SANEntry/binary>> = lists:foldl(fun(X, Acc) -> <<Acc/binary, ",DNS:", X/binary>> end, <<>>, SANs),
+% Returns the public key info for a given private key.
+-spec subject_public_key_info(open|closed, public_key:private_key()) -> #'SubjectPublicKeyInfo'{}.
+subject_public_key_info(Kind, #'RSAPrivateKey'{modulus=N,publicExponent=E}) ->
+    SubjectKey = public_key:der_encode('RSAPublicKey', #'RSAPublicKey'{modulus=N, publicExponent=E}),
+    #'SubjectPublicKeyInfo'{
+       algorithm=#'AlgorithmIdentifier'{
+		    algorithm=?'rsaEncryption',
+		    parameters=maybe_opentype(Kind,<<5,0>>)
+		   },
+       subjectPublicKey=SubjectKey
+    }.
 
-    {ok, File} = file:read_file("/etc/ssl/openssl.cnf"),
-    File2 = <<File/binary, "\n[SAN]\nsubjectAltName=DNS:", (bin(Domain))/binary,$,, SANEntry/binary>>,
-    ConfFile = <<"/tmp/letsencrypt_san_openssl.cnf">>,
-    file:write_file(ConfFile, File2),
+% Returns the AlgorithmIdentifier structure for the algorithm we'll use
+% when signing things with this key.
+-spec pkix_signature_algorithm(open|closed, public_key:private_key()) -> #'AlgorithmIdentifier'{}.
+pkix_signature_algorithm(Kind, #'RSAPrivateKey'{}) ->
+    #'AlgorithmIdentifier'{
+       algorithm=?'sha256WithRSAEncryption',
+       parameters=maybe_opentype(Kind, <<5,0>>)
+    }.
 
-    Cmd = io_lib:format(
-        "openssl req -new -key '~s' -out '~s' -subj '/CN=~s' -config '~s'", 
-        [Keyfile, OutName, Domain, ConfFile]),
-    Cmd1 = case Type of
-        request    -> [Cmd | " -reqexts SAN" ];
-        autosigned -> [Cmd | " -extensions SAN -x509 -sha256 -days 1" ]
-    end,
+maybe_opentype(open, V) -> { asn1_OPENTYPE, V };
+maybe_opentype(closed, V) -> V.
 
-    _Status  = os:cmd(Cmd1),
-    %io:format("mkcert(~p): ~p => ~p~n", [Type, lists:flatten(Cmd1), _Status]),
+opentype(T,V) ->
+    { asn1_OPENTYPE, public_key:der_encode(T, V) }.
 
-    file:delete(ConfFile),
-    {ok, OutName}.
+% Given an AlgorithmIdentifier and a key, produce a signature for an input.
+-spec pkix_signature(binary(), #'AlgorithmIdentifier'{}, public_key:private_key()) -> binary().
+pkix_signature(Tbs, {_, ?'sha256WithRSAEncryption', _}, #'RSAPrivateKey'{modulus=N,publicExponent=E,privateExponent=D}) ->
+    crypto:sign(rsa, sha256, iolist_to_binary(Tbs), [E,N,D]).
 
+% Helper for normalizing a cert's subject name list and choosing one
+% to put in the SN.
+-spec acc_generalnames(letsencrypt:subject_name(), {term(), list(public_key:general_name())}) -> {term(), list(public_key:general_name())}.
+acc_generalnames( {dNSName, DnsName} = Gn, { _, GNs } ) ->
+    { DnsName, [Gn|GNs] };
+acc_generalnames(DnsName, A) when is_list(DnsName) ->
+    acc_generalnames( {dNSName, DnsName}, A );
+acc_generalnames(DnsName, A) when is_binary(DnsName) ->
+    acc_generalnames( {dNSName, binary_to_list(DnsName)}, A);
+acc_generalnames( {_, _} = Gn, { Cn, GNs } ) ->
+    { Cn, [Gn|GNs] }.
+
+% Given a list of subject names, return a distinguished name for use in
+% the certificate subject, and a SubjectAltName extension.
+-spec cn_and_ext(list(letsencrypt:subject_name())) -> {term(), #'Extension'{}}.
+cn_and_ext(SubjectNames) ->
+    {CommonName, SANs} = lists:foldr(fun acc_generalnames/2, {none,[]}, SubjectNames),
+    {Attr,Value} =
+	case CommonName of
+	    none -> {?'id-at-pseudonym', "Server"};
+	    DnsName -> {?'id-at-commonName', DnsName}
+	end,
+    {
+      {rdnSequence,
+       [[#'AttributeTypeAndValue'{
+	    type=Attr,
+	    value=public_key:der_encode('DirectoryString', {printableString, Value})}]]},
+
+      #'Extension'{
+	 extnID=?'id-ce-subjectAltName',
+	 critical= (CommonName == none),
+	 extnValue=public_key:der_encode('SubjectAltName',SANs)
+	}
+    }.
+
+% Converts date+time to a UTCTime or GeneralTime in accordance with
+% the rules in RFC5280 for 2 vs. 4 digit years.
+-spec pkix_time(calendar:date(),calendar:time()) -> public_key:time().
+pkix_time({Y,Mo,Dd},{Hh,Mm,Ss}) ->
+    Tail = io_lib:format("~2..0B~2..0B~2..0B~2..0B~2..0BZ",
+		     [Mo,Dd,Hh,Mm,Ss]),
+    {Tag,Year} =
+	if
+	    (Y >= 1950) and (Y < 2000) ->
+		{ utcTime, io_lib:format("~2..0B", [Y - 1900]) };
+	    (Y >= 2000) and (Y < 2050) ->
+		{ utcTime, io_lib:format("~2..0B", [Y - 2000]) };
+	    true ->
+		{ generalTime, io_lib:format("~4..0B", [Y]) }
+	end,
+    { Tag, lists:flatten([Year,Tail]) }.
+
+% Returns a validity period starting a little before now and extending
+% for Hours hours.
+-spec validity_around_now(integer()) -> #'Validity'{}.
+validity_around_now(Hours) ->
+    {Date,{Hh,_,_}} = calendar:universal_time(),
+    Nh = Hh + Hours,
+    {EndDate, EndH} =
+	if
+	    Nh < 24 -> { Date, Nh };
+	    true -> begin
+		     DeltaD = Nh div 24,
+		     {
+		       calendar:gregorian_days_to_date(calendar:date_to_gregorian_days(Date) + DeltaD),
+		       Nh rem 24
+		     }
+		 end
+	end,
+    #'Validity'{
+       notBefore = pkix_time(Date, {Hh,0,0}),
+       notAfter = pkix_time(EndDate, {EndH, 0, 0})
+    }.
 
 -spec certificate(string(), binary(), binary(), string()) -> string().
 certificate(Domain, DomainCert, IntermediateCert, CertsPath) ->

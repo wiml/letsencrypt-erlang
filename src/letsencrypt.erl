@@ -28,9 +28,9 @@
 -type uri()            :: {Proto::(http|https), Host::string(), Port::integer(), Path::string()}.
 -type nonce()          :: binary().
 -type jws()            :: #{'alg' => 'RS256', 'jwk' => map(), nonce => undefined|letsencrypt:nonce() }.
--type ssl_privatekey() :: #{'raw' => crypto:rsa_private(), 'b64' => {binary(), binary()}, 'file' => string()}.
+-type ssl_privatekey() :: #{'key' => public_key:private_key(), 'file' => string()}.
 -type ssl_csr()        :: binary().
-
+-type subject_name()   :: string() | binary() | public_key:general_name().
 
 -ifdef(TEST).
     -define(STAGING_API_URL      , "http://127.0.0.1:4000/acme").

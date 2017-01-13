@@ -17,26 +17,29 @@
 
 -export([init/1, encode/3, thumbprint/2]).
 
+-include_lib("public_key/include/public_key.hrl").
+
 -spec init(letsencrypt:ssl_privatekey()) -> letsencrypt:jws().
-init(#{b64 := {N,E}}) ->
+init(#{key := Key = #'RSAPrivateKey'{}}) ->
     #{
         alg => 'RS256',
-        jwk =>  #{
-            kty     => 'RSA',
-            <<"n">> => N,
-            <<"e">> => E
-        },
+        jwk =>  jwk(Key),
         nonce => undefined
     }.
 
 
 -spec encode(letsencrypt:ssl_privatekey(), letsencrypt:jws(), map()) -> binary().
-encode(#{raw := RSAKey}, Jws, Content) ->
+encode(#{key := Key}, Jws, Content) ->
     %io:format("~p~n~p~n", [Jws, Content]),
     Protected = letsencrypt_utils:b64encode(jiffy:encode(Jws)),
     Payload   = letsencrypt_utils:b64encode(jiffy:encode(Content)),
+    ToBeSigned = <<Protected/binary, $., Payload/binary>>,
 
-    Sign  = crypto:sign(rsa, sha256, <<Protected/binary, $., Payload/binary>>, RSAKey),
+    Sign = case { Key, maps:get(alg, Jws) } of
+	       { #'RSAPrivateKey'{modulus=N, publicExponent=E,
+				  privateExponent=D}, 'RS256' } ->
+		   crypto:sign(rsa, sha256, ToBeSigned, [E,N,D])
+	   end,
     Sign2 = letsencrypt_utils:b64encode(Sign),
 
     jiffy:encode({[
@@ -48,14 +51,16 @@ encode(#{raw := RSAKey}, Jws, Content) ->
 
 
 -spec thumbprint(letsencrypt:ssl_privatekey(), binary()) -> binary().
-thumbprint(#{b64 := {N,E}}, Token) ->
+thumbprint(#{key := Key}, Token) ->
     % rfc7638 jwk thumbprint
-    %NOTE: json payload requires to be encoded in keys alphabetical order
-    Thumbprint = jiffy:encode({[
-        {e, E},
-        {kty, 'RSA'},
-        {n, N}
-    ]}, [force_utf8]),
-
+    Thumbprint = jiffy:encode(jwk(Key), [force_utf8]),
     <<Token/binary, $., (letsencrypt_utils:b64encode(crypto:hash(sha256, Thumbprint)))/binary>>.
 
+
+jwk(#'RSAPrivateKey'{modulus=N, publicExponent=E}) ->
+    %NOTE: json payload requires to be encoded in keys alphabetical order
+    {[
+        {e, letsencrypt_utils:b64encode(binary:encode_unsigned(E))},
+        {kty, 'RSA'},
+        {n, letsencrypt_utils:b64encode(binary:encode_unsigned(N))}
+    ]}.
