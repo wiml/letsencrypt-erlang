@@ -293,14 +293,14 @@ valid(_, _, State=#state{mode=Mode, domain=Domain, sans=SANs, cert_path=CertPath
     Conn  = get_conn(State),
     Nonce = get_nonce(Conn, State),
 
-    #{file := KeyFile} = letsencrypt_ssl:private_key({new, str(<<Domain/binary, ".key">>)}, CertPath),
-    Csr = letsencrypt_ssl:cert_request(str(Domain), CertPath, SANs),
+    EndEntityKey = letsencrypt_ssl:private_key({new, str(<<Domain/binary, ".key">>)}, CertPath),
+    Csr = letsencrypt_ssl:certificate_request([Domain | SANs], maps:get(key, EndEntityKey)),
 
-    {DomainCert, Nonce2} = letsencrypt_api:new_cert(Conn, BasePath, Key, JWS#{nonce => Nonce}, Csr),
+    {DomainCert, Nonce2} = letsencrypt_api:new_cert(Conn, BasePath, Key, JWS#{nonce => Nonce}, letsencrypt_utils:b64encode(Csr)),
 
     CertFile = letsencrypt_ssl:certificate(str(Domain), DomainCert, IntermediateCert, CertPath),
 
-    {reply, {ok, #{key => bin(KeyFile), cert => bin(CertFile)}}, idle, State#state{conn=Conn, nonce=Nonce2}}.
+    {reply, {ok, #{key => bin(maps:get(file, EndEntityKey)), cert => bin(CertFile)}}, idle, State#state{conn=Conn, nonce=Nonce2}}.
 
 %%%
 %%% 

@@ -16,7 +16,7 @@
 -author("Guillaume Bour <guillaume@bour.cc>").
 -author("Wim Lewis <wiml@hhhh.org>").
 
--export([private_key/2, cert_request/3, cert_autosigned/3, certificate/4]).
+-export([private_key/2, cert_autosigned/3, certificate/4]).
 -export([certificate_request/2, self_signed_certificate/2]).
 
 -include_lib("public_key/include/public_key.hrl").
@@ -45,13 +45,6 @@ read_private_key(Path) ->
     }.
 
 % compatibility shims, for now.
--spec cert_request(string(), string(), list(string())) -> letsencrypt:ssl_csr().
-cert_request(Domain, CertsPath, SANs) ->
-    KeyFile = CertsPath ++ "/" ++ Domain ++ ".key",
-    Key = read_private_key(KeyFile),
-    Csr = certificate_request([Domain | SANs], maps:get(key, Key)),
-    letsencrypt_utils:b64encode(Csr).
-
 
 % create temporary (1 day) certificate with subjectAlternativeName
 % used for tls-sni-01 challenge
