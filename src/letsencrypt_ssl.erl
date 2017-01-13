@@ -118,7 +118,17 @@ subject_public_key_info(Kind, #'RSAPrivateKey'{modulus=N,publicExponent=E}) ->
 		    parameters=maybe_opentype(Kind,<<5,0>>)
 		   },
        subjectPublicKey=SubjectKey
+    };
+subject_public_key_info(Kind, #'ECPrivateKey'{} = Key) ->
+    Params = public_key:der_encode('EcpkParameters', Key#'ECPrivateKey'.parameters),
+    #'SubjectPublicKeyInfo'{
+       algorithm=#'AlgorithmIdentifier'{
+		    algorithm = ?'id-ecPublicKey',
+		    parameters = maybe_opentype(Kind, Params)
+		   },
+       subjectPublicKey = Key#'ECPrivateKey'.publicKey
     }.
+
 
 % Returns the AlgorithmIdentifier structure for the algorithm we'll use
 % when signing things with this key.
@@ -127,7 +137,17 @@ pkix_signature_algorithm(Kind, #'RSAPrivateKey'{}) ->
     #'AlgorithmIdentifier'{
        algorithm=?'sha256WithRSAEncryption',
        parameters=maybe_opentype(Kind, <<5,0>>)
-    }.
+     };
+pkix_signature_algorithm(Kind, #'ECPrivateKey'{parameters={namedCurve, Curve}}) ->
+    Hash = case Curve of
+	       ?'secp256r1' -> ?'ecdsa-with-SHA256';
+	       ?'secp384r1' -> ?'ecdsa-with-SHA384';
+	       ?'secp521r1' -> ?'ecdsa-with-SHA512'
+	   end,
+    #'AlgorithmIdentifier'{
+       algorithm=Hash,
+       parameters=maybe_opentype(Kind, <<5,0>>)
+     }.
 
 maybe_opentype(open, V) -> { asn1_OPENTYPE, V };
 maybe_opentype(closed, V) -> V.
@@ -138,7 +158,18 @@ opentype(T,V) ->
 % Given an AlgorithmIdentifier and a key, produce a signature for an input.
 -spec pkix_signature(binary(), #'AlgorithmIdentifier'{}, public_key:private_key()) -> binary().
 pkix_signature(Tbs, {_, ?'sha256WithRSAEncryption', _}, #'RSAPrivateKey'{modulus=N,publicExponent=E,privateExponent=D}) ->
-    crypto:sign(rsa, sha256, iolist_to_binary(Tbs), [E,N,D]).
+    crypto:sign(rsa, sha256, iolist_to_binary(Tbs), [E,N,D]);
+pkix_signature(Tbs, {_, ?'ecdsa-with-SHA256', _}, Key) ->
+    ecdsa_sign(sha256, Tbs, Key);
+pkix_signature(Tbs, {_, ?'ecdsa-with-SHA384', _}, Key) ->
+    ecdsa_sign(sha384, Tbs, Key);
+pkix_signature(Tbs, {_, ?'ecdsa-with-SHA512', _}, Key) ->
+    ecdsa_sign(sha512, Tbs, Key).
+
+ecdsa_sign(Hash, Tbs,
+	   #'ECPrivateKey'{privateKey=Secret, parameters={namedCurve, CurveOid}}) ->
+    CurveName = pubkey_cert_records:namedCurves(CurveOid),
+    crypto:sign(ecdsa, Hash, iolist_to_binary(Tbs), [Secret,CurveName]).
 
 % Helper for normalizing a cert's subject name list and choosing one
 % to put in the SN.
