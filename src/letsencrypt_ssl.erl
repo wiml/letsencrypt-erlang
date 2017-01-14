@@ -18,6 +18,7 @@
 
 -export([private_key/2, cert_autosigned/3, certificate/4]).
 -export([certificate_request/2, self_signed_certificate/2]).
+-export([pk_to_cryptok/1]).
 
 -include_lib("public_key/include/public_key.hrl").
 -import(letsencrypt_utils, [bin/1]).
@@ -43,6 +44,15 @@ read_private_key(Path) ->
         key => public_key:pem_entry_decode(Key),
         file => Path
     }.
+
+% Converts a private key from the format used by public_key to the format
+% used by crypto.
+-spec pk_to_cryptok(public_key:private_key()) -> {crypto:public_key_algorithms(), crypto:private_key()}.
+pk_to_cryptok(#'ECPrivateKey'{privateKey=Secret, parameters={namedCurve, CurveOid}}) ->
+    CurveName = pubkey_cert_records:namedCurves(CurveOid),
+    {ecdsa, [Secret,CurveName]};
+pk_to_cryptok(#'RSAPrivateKey'{modulus=N,publicExponent=E,privateExponent=D}) ->
+    {rsa, [E,N,D]}.
 
 % compatibility shims, for now.
 
@@ -157,19 +167,16 @@ opentype(T,V) ->
 
 % Given an AlgorithmIdentifier and a key, produce a signature for an input.
 -spec pkix_signature(binary(), #'AlgorithmIdentifier'{}, public_key:private_key()) -> binary().
-pkix_signature(Tbs, {_, ?'sha256WithRSAEncryption', _}, #'RSAPrivateKey'{modulus=N,publicExponent=E,privateExponent=D}) ->
-    crypto:sign(rsa, sha256, iolist_to_binary(Tbs), [E,N,D]);
-pkix_signature(Tbs, {_, ?'ecdsa-with-SHA256', _}, Key) ->
-    ecdsa_sign(sha256, Tbs, Key);
-pkix_signature(Tbs, {_, ?'ecdsa-with-SHA384', _}, Key) ->
-    ecdsa_sign(sha384, Tbs, Key);
-pkix_signature(Tbs, {_, ?'ecdsa-with-SHA512', _}, Key) ->
-    ecdsa_sign(sha512, Tbs, Key).
+pkix_signature(Tbs, {_, AlgOID, _}, Key) ->
+    {PKAlg, SigAlg} = oid_get_algpair(AlgOID),
+    {PKAlg, PrivK} = pk_to_cryptok(Key),
+    crypto:sign(PKAlg, SigAlg, iolist_to_binary(Tbs), PrivK).
 
-ecdsa_sign(Hash, Tbs,
-	   #'ECPrivateKey'{privateKey=Secret, parameters={namedCurve, CurveOid}}) ->
-    CurveName = pubkey_cert_records:namedCurves(CurveOid),
-    crypto:sign(ecdsa, Hash, iolist_to_binary(Tbs), [Secret,CurveName]).
+-spec oid_get_algpair(public_key:oid()) -> {crypto:public_key_algorithms(), crypto:hash_algorithms()}.
+oid_get_algpair(?'sha256WithRSAEncryption') -> {rsa, sha256};
+oid_get_algpair(?'ecdsa-with-SHA256') -> {ecdsa, sha256};
+oid_get_algpair(?'ecdsa-with-SHA384') -> {ecdsa, sha384};
+oid_get_algpair(?'ecdsa-with-SHA512') -> {ecdsa, sha512}.
 
 % Helper for normalizing a cert's subject name list and choosing one
 % to put in the SN.

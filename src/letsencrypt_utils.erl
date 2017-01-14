@@ -15,9 +15,10 @@
 -module(letsencrypt_utils).
 -author("Guillaume Bour <guillaume@bour.cc>").
 
--export([b64encode/1, hexdigest/1, hashdigest/2, bin/1, str/1]).
+-export([b64encode/1, ber_get_tlv/2, hexdigest/1, hashdigest/2, bin/1, str/1]).
 
 -type character() :: integer().
+-type asn1_tag() :: {universal|application|context|private, primitive|constructed, integer()}.
 
 -spec b64encode(string()|binary()) -> binary().
 b64encode(X) ->
@@ -62,3 +63,41 @@ str(X) when is_integer(X) ->
 str(_X) ->
     throw(invalid).
 
+
+-spec ber_tag(asn1_tag()) -> binary().
+ber_tag({Cls,Cnst,Tag}) when Tag < 31 ->
+    % Construct the tag byte (we don't support tags greater than 30, so
+    % the tag is always 1 byte long).
+    << (case Cls of
+	    universal -> 0;
+	    application -> 1;
+	    context -> 2;
+	    private -> 3
+	end):2/integer,
+       (case Cnst of
+	    primitive -> 0;
+	    constructed -> 1
+	end):1/integer,
+       Tag:5/integer >>.
+
+% Simple BER parser helper. We assume that the caller is expecting a
+% specific tag, so we take it as an arg and fail on a mismatch.
+% We also fail on indefinite lengths.
+-spec ber_get_tlv(asn1_tag(), binary()) -> { binary(), binary() }.
+ber_get_tlv(ExpectedTag, BER) ->
+    TagByte = ber_tag(ExpectedTag),
+    % Parse the length field, which might be a plain length, or
+    % it might be an octet-count followed by that many octets of integer.
+    {Length, Rest} = case BER of
+			 <<TagByte:1/binary,0:1,L:7,R/binary>> ->
+			     {L, R};
+			 <<TagByte:1/binary,1:1,0:7,R/binary>> ->
+			     {indefinite, R};
+			 <<TagByte:1/binary,1:1,LL:7,R/binary>> ->
+			     LengthBits = LL * 8,
+			     <<L:LengthBits/integer,Rr/binary>> = R,
+			     {L, Rr}
+		     end,
+    % Split the contents off of any following data
+    <<Content:Length/binary, Rest2/binary>> = Rest,
+    { Content, Rest2 }.
