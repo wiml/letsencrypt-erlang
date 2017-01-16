@@ -66,6 +66,7 @@ encode(#{key := Key}, Jws, Content) ->
 % Look up the `crypto` algorithm pair represented by a JWS identifier.
 -spec alg_get_algpair(atom()) -> {crypto:public_key_algorithms(), crypto:digest_type()}.
 alg_get_algpair('RS256') -> {rsa,   sha256};
+alg_get_algpair('RS512') -> {rsa,   sha512};
 alg_get_algpair('ES256') -> {ecdsa, sha256};
 alg_get_algpair('ES384') -> {ecdsa, sha384};
 alg_get_algpair('ES512') -> {ecdsa, sha512}.

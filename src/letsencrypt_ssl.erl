@@ -48,11 +48,18 @@ read_private_key(Path) ->
 % Converts a private key from the format used by public_key to the format
 % used by crypto.
 -spec pk_to_cryptok(public_key:private_key()) -> {crypto:public_key_algorithms(), crypto:private_key()}.
-pk_to_cryptok(#'ECPrivateKey'{privateKey=Secret, parameters={namedCurve, CurveOid}}) ->
+pk_to_cryptok(#'ECPrivateKey'{privateKey=Secret,
+			      parameters={namedCurve, CurveOid}}) ->
     CurveName = pubkey_cert_records:namedCurves(CurveOid),
     {ecdsa, [Secret,CurveName]};
-pk_to_cryptok(#'RSAPrivateKey'{modulus=N,publicExponent=E,privateExponent=D}) ->
-    {rsa, [E,N,D]}.
+pk_to_cryptok(#'RSAPrivateKey'{modulus=N, publicExponent=E, privateExponent=D,
+			       prime1=P, prime2=Q,
+			       exponent1=Dp, exponent2=Dq, coefficient=Iqp}) ->
+    CrtParameters = [P,Q,Dp,Dq,Iqp],
+    case lists:all(fun is_integer/1, CrtParameters) of
+	true -> {rsa, [E,N,D] ++ CrtParameters};
+	false -> {rsa, [E,N,D]}
+    end.
 
 % compatibility shims, for now.
 
@@ -174,6 +181,7 @@ pkix_signature(Tbs, {_, AlgOID, _}, Key) ->
 
 -spec oid_get_algpair(public_key:oid()) -> {crypto:public_key_algorithms(), crypto:hash_algorithms()}.
 oid_get_algpair(?'sha256WithRSAEncryption') -> {rsa, sha256};
+oid_get_algpair(?'sha512WithRSAEncryption') -> {rsa, sha512};
 oid_get_algpair(?'ecdsa-with-SHA256') -> {ecdsa, sha256};
 oid_get_algpair(?'ecdsa-with-SHA384') -> {ecdsa, sha384};
 oid_get_algpair(?'ecdsa-with-SHA512') -> {ecdsa, sha512}.
